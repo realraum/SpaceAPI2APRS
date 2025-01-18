@@ -1,0 +1,4 @@
+spacedirectory==0.0.5
+geopy==2.4.1
+aprspy==0.3.3
+aprslib==0.7.2

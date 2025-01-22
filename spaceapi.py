@@ -1,123 +1,229 @@
-from spacedirectory import directory, views, space
+import sys
+
+from spacedirectory import tools
 from geopy.geocoders import Nominatim
 from aprspy import PositionPacket
-from datetime import datetime
+from datetime import datetime, timedelta
 import aprslib
 import hashlib
+import argparse
+import logging
+from log import setup_custom_logger
+
+setup_custom_logger()
+logger = logging.getLogger('root')
+
+aprs_is_server: str = "rotate.aprs2.net"
+aprs_is_call: str = "N0CALL"
+aprs_is_passwd: str = ""
+aprs_is_client: aprslib.IS
+aprs_dry_run: bool = False
 
 
-loc = Nominatim(user_agent="Geopy Library")
+class Space:
+    name: (str | None)
+    lat: (float | None)
+    lon: (float | None)
+    status: (bool | None)
+    last_seen: (datetime | None)
+    url: (str | None)
+
+    def __init__(self):
+        self.name = None
+        self.lon = None
+        self.lat = None
+        self.status = None
+        self.last_seen = None
+        self.url = None # optional
+
+    def valid(self) -> bool:
+        if self.name is not None \
+                and self.lon is not None \
+                and self.lat is not None \
+                and self.status is not None \
+                and self.last_seen is not None:
+            return True
+        else:
+            return False
 
 
-space_list = directory.get_spaces_list()
+def get_aprs_symbol(open_closed: bool) -> (str, str):
+    if open_closed:
+        return "\\", "-"
+    else:
+        return "/", '-'
 
 
-AIS = aprslib.IS("OE6FAX", passwd="19385",host="192.168.69.67" , port=14580, )
-AIS.connect()
+def send_space_to_aprs(space: Space):
+    message = PositionPacket()
 
-space_count = 0
-name_to_long = 0
+    # Relevant dynamic info for APRS packet
+    APRS_source: str = space.name
+    APRS_alt_name: str = ""
+    APRS_space_status: str = f"[{'OPEN' if space.status is True else 'CLOSED'}]"
+    APRS_symbol: (str, str) = get_aprs_symbol(space.status)
+    APRS_last_seen: str = ""
 
-for keys in space_list.keys():
+    # Shorten Name if too long,
+    if len(space.name) > 9:
+        hash = hashlib.sha1(space.name.encode('utf-8')).hexdigest()  # TODO: this might create hash collisions ??
+        APRS_source = f"Hckr-{hash[:4]}"
+        APRS_alt_name = space.name
+
+    # Only show last seen for spaces open during the last year
+    if datetime.now() - space.last_seen <= timedelta(days=365):
+        # Shorten last seen for spaces seen today
+        if datetime.now().strftime('%d') == space.last_seen.strftime('%d'):
+            APRS_last_seen = space.last_seen.strftime('%H:%M')
+        else:
+            APRS_last_seen = space.last_seen.strftime('%Y-%m-%d %H:%M')
+
+    message.symbol_table = APRS_symbol[0]
+    message.symbol_id = APRS_symbol[1]
+    message.source = APRS_source
+    message.destination = "APRS"
+    message.path = "APRS"
+    message.addressee = aprs_is_call
+    message.longitude = space.lon
+    message.latitude = space.lat
+    message.comment = f"{APRS_alt_name}{' ' if len(APRS_alt_name) > 0 else ''}{APRS_space_status} {APRS_last_seen}"
+
+    msg_len = len(message.comment)
+    print(f"comment length: {msg_len}")
+    if msg_len > 90:
+        logger.critical(f"APRS comment too long '{message.comment}'") # this should not happen
+        sys.exit(-1)
+    else:
+        if msg_len + len(space.url) + 1 <= 90:
+            message.comment = message.comment+' '+space.url  # optionally add space url if there's space in the comment
+
+    packet = message.generate()
+
+    # TODO: rate limit?
+    if not aprs_dry_run:
+        aprs_is_client.sendall(packet)
+    else:
+        print(packet)
+
+def send_space(space_json):
+    space_data = None
+    space = Space()
+
     try:
-        current_space = directory.get_space_from_name(keys)
-
+        space_data = space_json['data']
+    except KeyError:
         try:
-            longitude = current_space.location.longitude
-            latitude = current_space.location.latitude
+            logger.warning(f"Space api {space_json['url']} did not provide data")
+            return
+        except KeyError:
+            logger.error(f"json error, missing field 'url': {space_json}")
+            return
 
-        except:
+    try:
+        space.name = space_data['space']
+    except KeyError:
+        logger.critical(f"Space has no name: {space_json}")
+        return
 
-            try:
-                getLoc = loc.geocode(current_space.location.address)
-                longitude = getLoc.longitude
-                latitude = getLoc.latitude
-            except:
-                print("Failed to convert address to coordinates")
+    try:
+        space.last_seen = datetime.fromtimestamp(space_json['lastSeen'])
+    except KeyError:
+        logger.warning(f"Space '{space.name}' has no lastSeen")
+        return
 
+    try:
+        space.status = space_data['state']['open']
+    except KeyError:
+        logger.warning(f"Space '{space.name}' has no open/closed state")
+        return
 
-        print(keys)
-        hash = hashlib.sha1(keys.encode('utf-8')).hexdigest()
-        print("Latitude:", str(latitude))
-        print("Longitude:", str(longitude))
+    loc = None
+    try:
+        loc = space_data['location']
+    except KeyError:
+        logger.warning(f"Space '{space.name}' did not provide location info")
+        return
 
-        space_count = space_count + 1
-
+    try:
+        space.lon = loc['lon']
+        space.lat = loc['lat']
+    except KeyError:
+        logger.info(f"Space '{space.name}' did not provice LAT/LON info, trying via address")
         try:
-            message = PositionPacket()
-
-            
-            try:
-                timestamp = current_space.status.last_change
-                year = int(current_space.status.last_change.strftime("%Y"))
-
-                try:
-                    if (timestamp.strftime("%d") != datetime.utcnow().strftime("%d")):
-                        timestamp = timestamp.strftime("%d. %b, %H:%M")
-                    else:
-                        timestamp = timestamp.strftime("%H:%M")
-                except:
-                    pass
-
-                if (year >= 2025):
-                    if (current_space.status.is_open):
-                        message_string = "Open: " + str(timestamp)
-                        message.symbol_table = "\\"
-                        message.symbol_id = "-"
-
-                    else:
-                        message_string = "Closed: " + str(timestamp)
-                        message.symbol_table = "/"
-                        message.symbol_id = "-"
-                else:
-                    message_string = ""
-
-            except:
-                print("Error Time")
-                message_string = ""
-                message.symbol_table = "\\"
-                message.symbol_id = "-"
-                pass
-
-            #website = current_space.status.Space.website
-            #if (len(website) < 20):
-            #    message_string = message_string + "  " + website
-
-
-
-            if (len(keys) > 9):
-                name_to_long = name_to_long + 1
-                #message.source = "Hckspc-" + str(name_to_long)
-                message.source = "Hckr-" + hash[:4]
-                if (message_string == ""):
-                    message.comment = ""
-                else:
-                    message.comment = keys + "; " + message_string
+            addr = loc['address']
+            getLoc = loc.geocode(addr)
+            if getLoc:
+                space.lon = getLoc.longitude
+                space.lat = getLoc.latitude
             else:
-                message.source = keys
-                message.comment = message_string
+                logger.warning(f"Space '{space.name}': could not resolve address '{addr}' to coordinates")
+                return
+        except KeyError:
+            logger.warning(f"Space '{space.name}' did not address info")
+            return
 
-            message.destination = "APRS"
-            message.path = "APRS"
-            message.addressee = "OE6FAX"
+    try:
+        space.url = space_data['url']
+    except KeyError:
+        logger.info(f"Space '{space.name}' has no url")
 
-            message.latitude = latitude
-            message.longitude = longitude
-
-            packet = message.generate()
-
-            AIS.sendall(packet)
-
-            print(packet)
-            print("\n")
-
-        except:
-            print("APRS failed")
+    if space.valid():
+        logger.info(f"Sending space '{space.name}' via APRS")
+        send_space_to_aprs(space)
 
 
-    except:
-        pass
-        #print("Failed to connect to hackerspace api")
+def main():
+    global aprs_is_server, aprs_is_call, aprs_is_passwd, aprs_is_client, aprs_dry_run
+    parser = argparse.ArgumentParser(description="Send SpaceAPI (Hackerspace status + names + locations) information "
+                                                 "via APRS-IS.")
+    parser.add_argument('-v', '--verbose', type=int, dest='verbose', help="verbosity level")
+    parser.add_argument('-c', '--call', dest='callsign', help="'Uploader' callsign")
+    parser.add_argument('-p', '--passwd', dest='passwd', help="'Uploader' password for APRS-IS")
+    parser.add_argument('-s', '--server', dest='server',
+                        help=f"APRS-IS server [default: {aprs_is_server}]")
+    parser.add_argument('-d', '--dry', action='store_true', dest='dry',
+                        help='dry run, do not send to APRS-IS')
 
-print("\n\nSpace count:", str(space_count))
-print("Name to long:", str(name_to_long))
+    args = parser.parse_args()
+
+    if args.verbose:
+        if args.verbose <= 5 and args.verbose >= 0:
+            level = logging.CRITICAL - int(args.verbose) * 10
+            logger.setLevel(level)
+        else:
+            print("ERROR: stdout verbosity level must be between 0 and 5")
+            sys.exit()
+    else:
+        logger.setLevel(logging.WARNING)
+    if args.callsign:
+        aprs_is_call = args.callsign
+    else:
+        print("Must give callsign")
+        sys.exit()
+    if args.passwd:
+        aprs_is_passwd = args.passwd
+    else:
+        print("Must give APRS-IS password")
+    if args.server:
+        aprs_is_server = args.server
+    if args.dry:
+        aprs_dry_run = True
+
+    if not aprs_dry_run:
+        aprs_is_client = aprslib.IS(callsign=aprs_is_call, passwd=aprs_is_passwd, host=aprs_is_server, port=14580)
+        try:
+            aprs_is_client.connect()
+        except aprslib.exceptions.ConnectionError as e:
+            logger.critical(f"Could not connect to {aprs_is_server} as {aprs_is_call} ({aprs_is_passwd}), {e}")
+            sys.exit(-1)
+
+    location_service = Nominatim(user_agent="Geopy Library")
+    all_hackspaces = tools.get_json_data_from_url("https://api.spaceapi.io/")
+
+    for space in all_hackspaces:
+        send_space(space)
+
+if __name__ == '__main__':
+    main()
+
+sys.exit()

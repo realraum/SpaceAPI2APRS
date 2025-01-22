@@ -34,7 +34,7 @@ class Space:
         self.lat = None
         self.status = None
         self.last_seen = None
-        self.url = None # optional
+        self.url = None  # optional
 
     def valid(self) -> bool:
         if self.name is not None \
@@ -58,44 +58,44 @@ def send_space_to_aprs(space: Space):
     message = PositionPacket()
 
     # Relevant dynamic info for APRS packet
-    APRS_source: str = space.name
-    APRS_alt_name: str = ""
-    APRS_space_status: str = f"[{'OPEN' if space.status is True else 'CLOSED'}]"
-    APRS_symbol: (str, str) = get_aprs_symbol(space.status)
-    APRS_last_seen: str = ""
+    aprs_source: str = ""
+    aprs_alt_name: str = space.name
+    aprs_space_status: str = f"[{'OPEN' if space.status is True else 'CLOSED'}]"
+    aprs_symbol: (str, str) = get_aprs_symbol(space.status)
+    aprs_last_seen: str = ""
 
     # Shorten Name if too long,
-    if len(space.name) > 9:
-        hash = hashlib.sha1(space.name.encode('utf-8')).hexdigest()  # TODO: this might create hash collisions ??
-        APRS_source = f"Hckr-{hash[:4]}"
-        APRS_alt_name = space.name
+    hash = hashlib.sha1(space.name.encode('utf-8')).hexdigest()  # TODO: this might create hash collisions ??
+    aprs_source = f"Hckr-{hash[:4]}"
+    aprs_alt_name = space.name
 
     # Only show last seen for spaces open during the last year
     if datetime.now() - space.last_seen <= timedelta(days=365):
         # Shorten last seen for spaces seen today
         if datetime.now().strftime('%d') == space.last_seen.strftime('%d'):
-            APRS_last_seen = space.last_seen.strftime('%H:%M')
+            aprs_last_seen = space.last_seen.strftime('%H:%M')
         else:
-            APRS_last_seen = space.last_seen.strftime('%Y-%m-%d %H:%M')
+            aprs_last_seen = space.last_seen.strftime('%Y-%m-%d %H:%M')
 
-    message.symbol_table = APRS_symbol[0]
-    message.symbol_id = APRS_symbol[1]
-    message.source = APRS_source
+    message.symbol_table = aprs_symbol[0]
+    message.symbol_id = aprs_symbol[1]
+    message.source = aprs_source
     message.destination = "APRS"
     message.path = "APRS"
     message.addressee = aprs_is_call
     message.longitude = space.lon
     message.latitude = space.lat
-    message.comment = f"{APRS_alt_name}{' ' if len(APRS_alt_name) > 0 else ''}{APRS_space_status} {APRS_last_seen}"
+    message.comment = f"{aprs_alt_name}{' ' if len(aprs_alt_name) > 0 else ''}{aprs_space_status} {aprs_last_seen}"
 
     msg_len = len(message.comment)
-    print(f"comment length: {msg_len}")
+    logger.info(f"comment length: {msg_len}")
     if msg_len > 90:
-        logger.critical(f"APRS comment too long '{message.comment}'") # this should not happen
+        logger.critical(f"APRS comment too long '{message.comment}'")  # this should not happen
         sys.exit(-1)
     else:
+        # optionally add space url if there's space in the comment
         if msg_len + len(space.url) + 1 <= 90:
-            message.comment = message.comment+' '+space.url  # optionally add space url if there's space in the comment
+            message.comment = message.comment + ' ' + space.url
 
     packet = message.generate()
 
@@ -104,6 +104,7 @@ def send_space_to_aprs(space: Space):
         aprs_is_client.sendall(packet)
     else:
         print(packet)
+
 
 def send_space(space_json):
     space_data = None
@@ -223,7 +224,6 @@ def main():
     for space in all_hackspaces:
         send_space(space)
 
+
 if __name__ == '__main__':
     main()
-
-sys.exit()

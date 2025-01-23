@@ -19,6 +19,8 @@ aprs_is_passwd: str = ""
 aprs_is_client: aprslib.IS
 aprs_dry_run: bool = False
 
+aprs_msg_max_len = 67
+
 
 class Space:
     name: (str | None)
@@ -89,12 +91,12 @@ def send_space_to_aprs(space: Space):
 
     msg_len = len(message.comment)
     logger.info(f"comment length: {msg_len}")
-    if msg_len > 90:
+    if msg_len > aprs_msg_max_len:
         logger.critical(f"APRS comment too long '{message.comment}'")  # this should not happen
         sys.exit(-1)
     else:
         # optionally add space url if there's space in the comment
-        if msg_len + len(space.url) + 1 <= 90:
+        if msg_len + len(space.url) + 1 <= aprs_msg_max_len:
             message.comment = message.comment + ' ' + space.url
 
     packet = message.generate()
@@ -182,7 +184,7 @@ def main():
     parser.add_argument('-p', '--passwd', dest='passwd', help="'Uploader' password for APRS-IS")
     parser.add_argument('-s', '--server', dest='server',
                         help=f"APRS-IS server [default: {aprs_is_server}]")
-    parser.add_argument('-d', '--dry', action='store_true', dest='dry',
+    parser.add_argument('-n', '--dry-run', action='store_true', dest='dry',
                         help='dry run, do not send to APRS-IS')
 
     args = parser.parse_args()
@@ -220,6 +222,7 @@ def main():
 
     location_service = Nominatim(user_agent="Geopy Library")
     all_hackspaces = tools.get_json_data_from_url("https://api.spaceapi.io/")
+    logger.info(f"Found {len(all_hackspaces)} spaces in SpaceAPI")
 
     for space in all_hackspaces:
         send_space(space)
